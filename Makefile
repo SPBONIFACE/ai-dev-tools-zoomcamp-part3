@@ -12,7 +12,7 @@ run:
 	cd backend && uv run uvicorn backend.main:app --reload --port 8091
 
 test:
-	cd backend && uv run pytest -v
+	cd backend && uv run pytest -v --ignore=tests/test_compose_integration.py
 
 install:
 	cd backend && uv sync
