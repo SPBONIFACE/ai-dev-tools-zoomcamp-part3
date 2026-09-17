@@ -1,0 +1,689 @@
+openapi: 3.0.3
+info:
+  title: Collaborative System Design Interview Platform API
+  description: |
+    API agreement between the React frontend and FastAPI backend for the 
+    Collaborative System Design Interview Platform (Loopback).
+    Defines authentication, session management, board state persistence, 
+    and real-time collaboration.
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:8091
+    description: Local FastAPI development server
+
+paths:
+  # ---------------------------------------------------------------------------
+  # Authentication (Interviewer)
+  # ---------------------------------------------------------------------------
+  /api/auth/signup:
+    post:
+      summary: Register a new interviewer account
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthCredentials'
+      responses:
+        '201':
+          description: User registered successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          description: Invalid input or email already registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/auth/login:
+    post:
+      summary: Authenticate an interviewer and retrieve a bearer token
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthCredentials'
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401':
+          description: Invalid email or password
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/auth/me:
+    get:
+      summary: Retrieve current authenticated interviewer profile
+      tags: [Auth]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Current user profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfile'
+        '401':
+          description: Unauthorized
+
+  # ---------------------------------------------------------------------------
+  # Sessions (Interviewer Dashboard)
+  # ---------------------------------------------------------------------------
+  /api/sessions:
+    get:
+      summary: List all interview sessions owned by the authenticated interviewer
+      tags: [Sessions]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: List of sessions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Session'
+        '401':
+          description: Unauthorized
+
+    post:
+      summary: Create a new interview session with a unique join token
+      tags: [Sessions]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSessionRequest'
+      responses:
+        '201':
+          description: Session created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '400':
+          description: Invalid session parameters
+        '401':
+          description: Unauthorized
+
+  /api/sessions/{id}:
+    get:
+      summary: Get details of a specific session owned by the interviewer
+      tags: [Sessions]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Session details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '401':
+          description: Unauthorized
+        '404':
+          description: Session not found
+
+    patch:
+      summary: Update session details (title, notes, status, link revocation)
+      tags: [Sessions]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateSessionRequest'
+      responses:
+        '200':
+          description: Session updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '401':
+          description: Unauthorized
+        '404':
+          description: Session not found
+
+    delete:
+      summary: Delete an interview session and its board elements
+      tags: [Sessions]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Session deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '401':
+          description: Unauthorized
+        '404':
+          description: Session not found
+
+  # ---------------------------------------------------------------------------
+  # Boards (Candidate & Interviewer Access via Join Token)
+  # ---------------------------------------------------------------------------
+  /api/boards/{token}:
+    get:
+      summary: Fetch board state and metadata using the shareable join token
+      description: |
+        Called when any user (candidate, observer, or interviewer) joins the board
+        via link `/b/{token}`. No login required. Validates if token is valid and active.
+      tags: [Board]
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 4
+            maxLength: 64
+      responses:
+        '200':
+          description: Board state loaded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BoardJoinResponse'
+        '404':
+          description: Board session not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BoardNotFoundResponse'
+
+  /api/boards/{token}/ops:
+    post:
+      summary: Batch persist board mutations (upserts and deletes of elements)
+      description: |
+        Called periodically or upon element modification to persist canvas state.
+        Works via join token without user login.
+      tags: [Board]
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 4
+            maxLength: 64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PushOpsRequest'
+      responses:
+        '200':
+          description: Operations applied successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '403':
+          description: Board link is revoked or session is completed
+        '404':
+          description: Session not found
+
+  /api/boards/{token}/owned:
+    get:
+      summary: Verify if the current authenticated user owns this board session
+      description: |
+        Used by the board route to check if the current viewer is the interviewer
+        who created the session, enabling private notes panel and interviewer controls.
+      tags: [Board]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Ownership status and private details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BoardOwnershipResponse'
+
+  # ---------------------------------------------------------------------------
+  # Real-Time Collaboration (WebSocket)
+  # ---------------------------------------------------------------------------
+  /ws/board/{token}:
+    get:
+      summary: WebSocket connection for live cursors, presence, and real-time element sync
+      description: |
+        Two-way WebSocket channel for simultaneous drawing.
+        - Clients send cursor coordinates, presence updates, and element operations.
+        - Server broadcasts them to all other connected peers in the same room.
+      tags: [Realtime]
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: name
+          in: query
+          required: false
+          description: Display name of the participant (e.g. Candidate name or Interviewer)
+          schema:
+            type: string
+        - name: role
+          in: query
+          required: false
+          description: Participant role ('interviewer', 'candidate', 'observer')
+          schema:
+            type: string
+            enum: [interviewer, candidate, observer]
+            default: candidate
+      responses:
+        '101':
+          description: Switching Protocols to WebSocket
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    # --- Common & Auth Models ---
+    AuthCredentials:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: interviewer@example.com
+        password:
+          type: string
+          minLength: 6
+          example: secretpass123
+
+    UserProfile:
+      type: object
+      required: [id, email]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        created_at:
+          type: string
+          format: date-time
+
+    AuthResponse:
+      type: object
+      required: [access_token, token_type, user]
+      properties:
+        access_token:
+          type: string
+        token_type:
+          type: string
+          example: bearer
+        user:
+          $ref: '#/components/schemas/UserProfile'
+
+    SuccessResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+          example: true
+
+    ErrorResponse:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          type: string
+          example: Invalid credentials
+
+    # --- Session Models ---
+    Session:
+      type: object
+      required:
+        - id
+        - owner_id
+        - title
+        - candidate_name
+        - role_title
+        - status
+        - join_token
+        - notes
+        - link_revoked
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        owner_id:
+          type: string
+          format: uuid
+        title:
+          type: string
+          example: System design interview
+        candidate_name:
+          type: string
+          example: Jane Doe
+        role_title:
+          type: string
+          example: Senior Backend Engineer
+        status:
+          type: string
+          enum: [draft, live, completed]
+          example: live
+        join_token:
+          type: string
+          example: 7k29a1b0cd93fa
+        notes:
+          type: string
+          description: Private interviewer notes
+        link_revoked:
+          type: boolean
+          example: false
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    CreateSessionRequest:
+      type: object
+      required: [title]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 120
+          example: System design interview
+        candidate_name:
+          type: string
+          maxLength: 120
+          default: ""
+          example: Jane Doe
+        role_title:
+          type: string
+          maxLength: 120
+          default: ""
+          example: Senior Infrastructure Engineer
+
+    UpdateSessionRequest:
+      type: object
+      properties:
+        title:
+          type: string
+          maxLength: 120
+        candidate_name:
+          type: string
+          maxLength: 120
+        role_title:
+          type: string
+          maxLength: 120
+        notes:
+          type: string
+          maxLength: 20000
+        status:
+          type: string
+          enum: [draft, live, completed]
+        link_revoked:
+          type: boolean
+
+    # --- Board & Canvas Elements Models ---
+    ColorKey:
+      type: string
+      enum:
+        - node-service
+        - node-data
+        - node-flow
+        - node-edge-net
+        - node-ai
+        - node-external
+        - node-note
+
+    ShapeKey:
+      type: string
+      enum:
+        - client
+        - service
+        - gateway
+        - loadbalancer
+        - database
+        - cache
+        - queue
+        - storage
+        - cdn
+        - llm
+        - external
+        - group
+        - note
+
+    NodeElement:
+      type: object
+      required: [id, kind, shape, x, y, w, h, label, sub, color]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum: [node]
+        shape:
+          $ref: '#/components/schemas/ShapeKey'
+        x:
+          type: number
+        y:
+          type: number
+        w:
+          type: number
+        h:
+          type: number
+        label:
+          type: string
+        sub:
+          type: string
+        color:
+          $ref: '#/components/schemas/ColorKey'
+
+    EdgeElement:
+      type: object
+      required: [id, kind, from, to, style, arrow, label, color]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum: [edge]
+        from:
+          type: string
+        to:
+          type: string
+        style:
+          type: string
+          enum: [solid, dashed]
+        arrow:
+          type: string
+          enum: [end, both, none]
+        label:
+          type: string
+        color:
+          $ref: '#/components/schemas/ColorKey'
+
+    DrawElement:
+      type: object
+      required: [id, kind, points, color, width]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum: [draw]
+        points:
+          type: array
+          items:
+            type: number
+        color:
+          $ref: '#/components/schemas/ColorKey'
+        width:
+          type: number
+
+    TextElement:
+      type: object
+      required: [id, kind, x, y, text, color, size]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum: [text]
+        x:
+          type: number
+        y:
+          type: number
+        text:
+          type: string
+        color:
+          $ref: '#/components/schemas/ColorKey'
+        size:
+          type: number
+
+    BoardElement:
+      oneOf:
+        - $ref: '#/components/schemas/NodeElement'
+        - $ref: '#/components/schemas/EdgeElement'
+        - $ref: '#/components/schemas/DrawElement'
+        - $ref: '#/components/schemas/TextElement'
+      discriminator:
+        propertyName: kind
+
+    BoardOp:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [upsert, delete]
+        el:
+          $ref: '#/components/schemas/BoardElement'
+        id:
+          type: string
+
+    PushOpsRequest:
+      type: object
+      required: [ops]
+      properties:
+        ops:
+          type: array
+          items:
+            $ref: '#/components/schemas/BoardOp'
+
+    BoardSessionSummary:
+      type: object
+      required: [id, title, role_title, candidate_name, status, link_revoked]
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        role_title:
+          type: string
+        candidate_name:
+          type: string
+        status:
+          type: string
+        link_revoked:
+          type: boolean
+
+    BoardJoinResponse:
+      type: object
+      required: [found, revoked, session, elements]
+      properties:
+        found:
+          type: boolean
+          example: true
+        revoked:
+          type: boolean
+          example: false
+        session:
+          $ref: '#/components/schemas/BoardSessionSummary'
+        elements:
+          type: array
+          items:
+            $ref: '#/components/schemas/BoardElement'
+
+    BoardNotFoundResponse:
+      type: object
+      required: [found]
+      properties:
+        found:
+          type: boolean
+          example: false
+        revoked:
+          type: boolean
+          example: false
+
+    BoardOwnershipResponse:
+      type: object
+      required: [owned]
+      properties:
+        owned:
+          type: boolean
+        session:
+          $ref: '#/components/schemas/Session'
+          nullable: true

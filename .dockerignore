@@ -1,0 +1,8 @@
+frontend/node_modules
+frontend/.output
+backend/.venv
+backend/__pycache__
+backend/.pytest_cache
+backend/interview_boards.db
+.git
+.DS_Store

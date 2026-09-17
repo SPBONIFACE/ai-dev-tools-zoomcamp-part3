@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: sdip-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: sdip
+      POSTGRES_PASSWORD: sdip
+      POSTGRES_DB: sdip
+    ports:
+      - "5432:5432"
+    volumes:
+      - sdip-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sdip -d sdip"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sdip-app
+    restart: always
+    ports:
+      - "8100:8000"
+    environment:
+      - SDIP_DATABASE_URL=postgresql://sdip:sdip@postgres:5432/sdip
+      - PORT=8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  sdip-pgdata:

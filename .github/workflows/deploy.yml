@@ -1,0 +1,144 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ==========================================
+  # JOB 1: Parallel Backend Unit Tests
+  # ==========================================
+  backend-tests:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies & run pytest
+        run: |
+          cd backend
+          uv sync
+          uv run pytest -v
+
+  # ==========================================
+  # JOB 2: Parallel Frontend Build & Lint Tests
+  # ==========================================
+  frontend-tests:
+    name: Frontend Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install frontend dependencies and build
+        run: |
+          cd frontend
+          npm install --legacy-peer-deps
+          ENV NITRO_PRESET=node-server npm run build
+
+  # ==========================================
+  # JOB 3: Integration & Playwright E2E Tests
+  # ==========================================
+  integration-and-e2e:
+    name: Compose Integration & E2E Tests
+    needs: [backend-tests, frontend-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and start Docker Compose stack
+        run: |
+          docker compose up --build -d
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install test dependencies & Playwright Chromium
+        run: |
+          cd backend
+          uv sync
+          uv run playwright install --with-deps chromium
+
+      - name: Run Integration Tests against Compose
+        run: |
+          make test-integration
+
+      - name: Run Playwright E2E Tests against Compose
+        run: |
+          make e2e
+
+      - name: Stop Docker Compose stack
+        if: always()
+        run: |
+          docker compose down
+
+  # ==========================================
+  # JOB 4: Deploy to Cloud Run & Validate
+  # ==========================================
+  deploy:
+    name: Deploy to Google Cloud Run
+    needs: [integration-and-e2e]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ai-dev-tool-zoomcamp
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy interview-canvas \
+            --source . \
+            --region europe-west9 \
+            --platform managed \
+            --allow-unauthenticated \
+            --set-env-vars SDIP_DATABASE_URL="${{ secrets.SDIP_DATABASE_URL }}" \
+            --port 8000 \
+            --min-instances 0 \
+            --max-instances 2 \
+            --memory 512Mi \
+            --timeout 300
+
+      - name: Validate Deployment (Health Check)
+        run: |
+          SERVICE_URL=$(gcloud run services describe interview-canvas --region europe-west9 --format 'value(status.url)')
+          echo "Deployed service URL: $SERVICE_URL"
+          curl --fail --retry 5 --retry-delay 5 "$SERVICE_URL/api/health"
