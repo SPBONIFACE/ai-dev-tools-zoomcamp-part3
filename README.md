@@ -204,7 +204,11 @@ Jobs 1 and 2 run **in parallel** (fast feedback). Job 3 only runs if both pass. 
 
 # CI/CD Learning Guide
 
-This section is a standalone reference explaining CI/CD concepts in depth.
+Steps 1 through 6 above show *what* we built and *how* to use it. But if you're new to CI/CD — or you've heard the term but it still feels abstract — this section explains the *why* behind it all.
+
+In practice, the CI/CD pipeline (Step 6) is the glue between the two setups. It takes the same tests we run locally in Setup 1 (unit tests, Docker Compose integration tests, Playwright E2E) and re-runs them automatically on GitHub's servers every time we push code. Only if every test passes does it proceed to Setup 2's deployment step. This means we can never accidentally ship broken code to production — the pipeline acts as a gatekeeper between our laptop and the cloud.
+
+The sections below unpack these ideas in more detail.
 
 ## 1. What is CI/CD? The Big Picture
 
