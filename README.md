@@ -1,127 +1,210 @@
-# System Design Interview Platform (SDIP) - Part 3
-> **Containerization, Full-Stack Testing, and Cloud-Native CI/CD Pipeline**  
-> *Part 3 of the AI Dev Tools Zoomcamp by DataTalks.Club*
+# System Design Interview Platform (SDIP) — Part 3
+
+> **Deploy a Full-Stack App with AI Coding Assistants**
+> *Part 3 of the [AI Dev Tools Zoomcamp](https://github.com/DataTalksClub/ai-dev-tools-zoomcamp) by DataTalks.Club*
 
 [![CI/CD Pipeline](https://github.com/SPBONIFACE/ai-dev-tools-zoomcamp-part3/actions/workflows/deploy.yml/badge.svg)](https://github.com/SPBONIFACE/ai-dev-tools-zoomcamp-part3/actions/workflows/deploy.yml)
 
-A production-ready collaborative system design interview platform. An interviewer can create an interview session, share an invite link with a candidate, and collaborate on a shared infinite canvas with real-time bidirectional WebSocket synchronization.
+---
 
-In **Part 3**, this application was transformed from a local development prototype into a containerized, thoroughly tested, and cloud-deployed application using **Google Cloud Run**, **Neon Serverless PostgreSQL**, and a 4-stage **GitHub Actions CI/CD Pipeline**.
+## What This Part Covers
+
+In Part 2 we built a working interview-canvas application locally — a React frontend, a FastAPI backend with WebSockets, and an SQLite database. Everything ran on our laptop.
+
+**Part 3 takes that local prototype and turns it into something deployable, testable, and automatically shipped to the cloud.** The course walks through a clear sequence of steps, each building on the previous one:
+
+```mermaid
+flowchart TD
+    A["1. Containerize the App\n(Single multi-stage Dockerfile)"] --> B["2. Switch from SQLite to Postgres\n(Production-grade database)"]
+    B --> C["3. Docker Compose\n(Run everything locally with one command)"]
+    C --> D["4. Integration & E2E Tests\n(Verify it actually works)"]
+    D --> E["5. Deploy to the Cloud\n(Google Cloud Run + Neon Postgres)"]
+    E --> F["6. CI/CD with GitHub Actions\n(Automate the whole thing)"]
+```
+
+The rest of this README is organized around these two setups — **local development** and **production deployment** — and explains how CI/CD bridges the gap between them.
 
 ---
 
-## 📑 Table of Contents
-- [Architecture Overview](#architecture-overview)
-- [Quickstart (Docker Compose)](#quickstart-docker-compose)
-- [Testing Suite](#testing-suite)
-- [CI/CD Guide & Architecture Deep-Dive](#cicd-guide--architecture-deep-dive)
+## Table of Contents
+
+- [Setup 1: Local Development (Docker Compose)](#setup-1-local-development-docker-compose)
+  - [Step 1 — Containerize the Application](#step-1--containerize-the-application)
+  - [Step 2 — Switch from SQLite to PostgreSQL](#step-2--switch-from-sqlite-to-postgresql)
+  - [Step 3 — Docker Compose (One Command to Run Everything)](#step-3--docker-compose-one-command-to-run-everything)
+  - [Step 4 — Integration and End-to-End Tests](#step-4--integration-and-end-to-end-tests)
+- [Setup 2: Full Production Deployment](#setup-2-full-production-deployment)
+  - [Step 5 — Deploy to the Cloud](#step-5--deploy-to-the-cloud)
+  - [Step 6 — CI/CD with GitHub Actions](#step-6--cicd-with-github-actions)
+- [CI/CD Learning Guide](#cicd-learning-guide)
   - [1. What is CI/CD? The Big Picture](#1-what-is-cicd-the-big-picture)
   - [2. How Our Pipeline Works in GitHub Actions](#2-how-our-pipeline-works-in-github-actions)
   - [3. Why This Architecture is Production-Grade](#3-why-this-architecture-is-production-grade)
-- [Zero-Cost Cloud Infrastructure](#zero-cost-cloud-infrastructure)
 - [Project Structure](#project-structure)
 
 ---
 
-## Architecture Overview
+# Setup 1: Local Development (Docker Compose)
 
-```mermaid
-flowchart TD
-    subgraph Client["Web Clients"]
-        Interviewer["Interviewer Browser"]
-        Candidate["Candidate Browser"]
-    end
+This is how you run and test the application entirely on your own machine — no cloud account needed, no external services. By the end of this setup you have a fully working full-stack app with a real PostgreSQL database, integration tests, and a Playwright browser test — all running locally.
 
-    subgraph Container["Unified Docker Container (Port 8000)"]
-        subgraph FrontendSSR["Frontend Runtime (Port 3000)"]
-            Node["Node.js 22 Nitro Server\n(SolidJS / React UI Bundle)"]
-        end
-        subgraph BackendAPI["Backend Runtime (Port 8000)"]
-            FastAPI["FastAPI App (Python 3.13)\n• Auth & Session APIs\n• WebSocket Hub (/ws/board)\n• Reverse Proxy to Internal 3000"]
-        end
-    end
+## Step 1 — Containerize the Application
 
-    subgraph Database["Relational Database"]
-        PostgresLocal["Local: PostgreSQL 16 (Docker Compose)"]
-        PostgresCloud["Production: Neon.tech Serverless Postgres (SSL)"]
-    end
+In development, the frontend and backend run as separate processes. In production, we don't need that — we build the frontend once and the backend serves the static files.
 
-    Interviewer <-->|HTTP & WebSocket| FastAPI
-    Candidate <-->|HTTP & WebSocket| FastAPI
-    FastAPI -->|Internal SSR Proxy| Node
-    FastAPI -->|SQLAlchemy Connection Pool| PostgresLocal
-    FastAPI -.->|Production SSL URL| PostgresCloud
+The [`Dockerfile`](./Dockerfile) uses a **two-stage build**:
+
+```
+Stage 1 (Node 22-alpine)         Stage 2 (Python 3.13-slim + Node runtime)
+┌──────────────────────┐          ┌──────────────────────────────────┐
+│  npm install          │          │  Copy compiled frontend from S1  │
+│  npm run build        │  ──────► │  uv sync (Python deps)           │
+│  → .output/ bundle    │          │  start.sh launches both servers  │
+└──────────────────────┘          └──────────────────────────────────┘
 ```
 
-### Key Architectural Characteristics
-1. **Single Unified Container:** The multi-stage [`Dockerfile`](./Dockerfile) builds the frontend with Node.js 22 and packages it inside a lightweight Python 3.13-slim runtime. FastAPI serves both the REST API, the WebSockets, and the frontend SSR bundle.
-2. **Zero-Setup Database Migrations:** Database tables and constraints are managed via SQLAlchemy models with automatic table creation upon startup, adapting seamlessly between local PostgreSQL and cloud-hosted PostgreSQL with connection pooling.
-3. **Real-Time Canvas Sync:** Broadcasts canvas operations (`upsert`, `delete`, `move`) across WebSockets with in-memory presence tracking and persistent database storage.
+* **Stage 1** compiles the React/Nuxt frontend into static HTML/JS/CSS with `NITRO_PRESET=node-server`.
+* **Stage 2** starts from a slim Python image, installs Node.js for the SSR server, copies the compiled frontend, installs Python backend dependencies via `uv`, and uses [`start.sh`](./start.sh) to launch both the frontend SSR server (port 3000 internally) and FastAPI (port 8000 externally).
 
----
+The result is a **single container** that serves the entire application.
 
-## Quickstart (Docker Compose)
+## Step 2 — Switch from SQLite to PostgreSQL
 
-The easiest way to run the entire full-stack application locally with real PostgreSQL is Docker Compose:
+SQLite is great for local development (zero config, data in a single file), but for production we need PostgreSQL — it handles concurrent connections, is network-accessible, and is what every managed database service runs.
 
-### 1. Start the Stack
+Because we set up **SQLAlchemy** from the start (in Part 2), the switch is straightforward: we added `psycopg2-binary` as a dependency and updated [`database.py`](./backend/src/backend/database.py) to accept a `SDIP_DATABASE_URL` environment variable that works with both SQLite and PostgreSQL connection strings.
+
+## Step 3 — Docker Compose (One Command to Run Everything)
+
+Instead of manually starting a PostgreSQL container and then the app, [`docker-compose.yaml`](./docker-compose.yaml) defines both services together:
+
+| Service | Image | Port | What it does |
+|:---|:---|:---|:---|
+| `postgres` | `postgres:16-alpine` | `5432` | Runs PostgreSQL with a healthcheck (`pg_isready`) |
+| `app` | Built from local `Dockerfile` | `8100 → 8000` | Full-stack app, waits for Postgres to be healthy before starting |
+
+**Run the entire stack with one command:**
+
 ```bash
 docker compose up --build
 ```
-* PostgreSQL starts on `localhost:5432` with an automated healthcheck.
-* The unified app starts on `http://localhost:8100`.
 
-### 2. Access the Application
-* **Web UI:** [http://localhost:8100](http://localhost:8100)
-* **Interactive API Docs (Swagger):** [http://localhost:8100/docs](http://localhost:8100/docs)
-* **Health Check:** [http://localhost:8100/api/health](http://localhost:8100/api/health)
+Then open:
+- **Application:** [http://localhost:8100](http://localhost:8100)
+- **API Docs (Swagger):** [http://localhost:8100/docs](http://localhost:8100/docs)
+- **Health Check:** [http://localhost:8100/api/health](http://localhost:8100/api/health)
 
-### 3. Stop the Stack
+**Stop everything:**
+
 ```bash
 docker compose down
 ```
 
+## Step 4 — Integration and End-to-End Tests
+
+With Docker Compose running, we can now verify that the container, the database, and the frontend all work together. There are three levels of tests:
+
+### Unit Tests (fast, no Docker needed)
+```bash
+make test
+```
+Runs 16 backend tests in ~0.7s using FastAPI's `TestClient` with an in-memory database. Tests auth flows, session CRUD, board operations, and WebSocket message framing.
+
+### Integration Tests (against live Docker Compose stack)
+```bash
+make test-integration
+```
+Runs 5 scenarios against `http://localhost:8100`:
+1. Container readiness and `/api/health` response.
+2. Frontend bundle served correctly at `/`.
+3. User registration, JWT authentication, and database persistence.
+4. Full session lifecycle: create session → generate join link → candidate joins → push board operations → verify persistence.
+5. Bidirectional WebSocket sync between interviewer and candidate.
+
+### Playwright End-to-End Test (two real browsers)
+```bash
+make e2e
+```
+Opens two isolated Chromium browser contexts — one as the **interviewer**, one as the **candidate** — and verifies the complete collaboration workflow: login, create session, share link, join, draw on canvas, and confirm real-time sync.
+
+At this point, we are **confident the application works**. Time to deploy it.
+
 ---
 
-## Testing Suite
+# Setup 2: Full Production Deployment
 
-The repository contains three levels of automated testing:
+This is where the application leaves your laptop and runs on real cloud infrastructure, accessible to anyone on the internet. The course tutorial deploys to AWS (EC2 + CloudFormation), but you can use any cloud provider. We chose **Google Cloud Run** with **Neon Serverless PostgreSQL** for a zero-cost architecture.
+
+## Step 5 — Deploy to the Cloud
 
 ```mermaid
 flowchart LR
-    Unit["Unit Tests\n(FastAPI TestClient)\n16 passed in 0.7s"] --> Integration["Integration Tests\n(Live Docker Compose Stack)\n5 scenarios against HTTP & WS"]
-    Integration --> E2E["Playwright E2E\n(Dual Browser Contexts)\nInterviewer & Candidate Sync"]
+    subgraph Local["Your Laptop (Setup 1)"]
+        DC["Docker Compose\nPostgres + App\nlocalhost:8100"]
+    end
+    subgraph Cloud["Google Cloud (Setup 2)"]
+        CR["Cloud Run\n(europe-west9)\nAutoscales 0↔2 instances"]
+        NeonDB["Neon.tech\nServerless PostgreSQL\n(SSL + auto-pause)"]
+    end
+    Local -.->|"Same Dockerfile\nSame code"| CR
+    CR <--> NeonDB
 ```
 
-### 1. Backend Unit Tests
-Runs fast, isolated tests for authentication, session creation, board operations, and WebSocket message framing:
-```bash
-make test
-# Or: cd backend && uv run pytest -v
+The key difference between local and production:
+
+| Aspect | Local (Docker Compose) | Production (Cloud Run) |
+|:---|:---|:---|
+| **Compute** | Your laptop runs the container | Google Cloud Run runs the same container |
+| **Database** | PostgreSQL 16 in a local Docker container | Neon.tech serverless PostgreSQL (cloud-hosted, SSL) |
+| **Database URL** | `postgresql://sdip:sdip@postgres:5432/sdip` | Injected via GitHub Secrets (`SDIP_DATABASE_URL`) |
+| **Port** | `localhost:8100` | Public `https://*.a.run.app` URL with HTTPS |
+| **Scaling** | Always running while Docker is up | Scales to 0 when idle (zero cost), auto-scales up on traffic |
+| **How you deploy** | `docker compose up --build` | Automated via CI/CD on every `git push` |
+
+### Cloud Infrastructure (Zero Cost)
+
+| Component | Provider | Cost |
+|:---|:---|:---|
+| Compute & Serving | Google Cloud Run (`--min-instances 0 --max-instances 2`) | Free Tier |
+| Database | Neon.tech Serverless PostgreSQL (auto-pause after 5 min idle) | Free Tier |
+| Container Registry | Google Artifact Registry | Free Tier |
+| CI/CD | GitHub Actions (2,000 min/month) | Free Tier |
+
+## Step 6 — CI/CD with GitHub Actions
+
+This is the final piece: every time we push to `main`, the application is automatically tested and deployed. No manual SSH, no clicking buttons in a cloud console.
+
+The pipeline is defined in [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) and runs four jobs:
+
+```mermaid
+flowchart TD
+    Push["git push origin main"] --> Job1["Job 1: Backend Tests\n(pytest, 16 unit tests)"]
+    Push --> Job2["Job 2: Frontend Build\n(Node 22, npm run build)"]
+
+    Job1 -->|Pass| Job3["Job 3: Docker Compose\nIntegration & Playwright E2E"]
+    Job2 -->|Pass| Job3
+
+    Job3 -->|Pass| Job4["Job 4: Deploy to Cloud Run\n+ Health Check Verification"]
+
+    Job1 -->|Fail| Stop["❌ Pipeline stops\nBroken code never reaches production"]
+    Job2 -->|Fail| Stop
+    Job3 -->|Fail| Stop
 ```
 
-### 2. Compose Integration Tests
-Runs against the live Docker Compose container stack (`http://localhost:8100`):
-```bash
-make test-integration
-# Or: cd backend && uv run pytest -v ../e2e/test_compose_integration.py
-```
-* **Scenario 1:** Container readiness & health check (`/api/health`).
-* **Scenario 2:** Frontend bundle delivery at root (`/`).
-* **Scenario 3:** User registration, password hashing, and JWT token authentication.
-* **Scenario 4:** Session creation, join-token generation, candidate unauthenticated access, and PostgreSQL persistence.
-* **Scenario 5:** Live bidirectional WebSocket synchronization between candidate and interviewer.
+| Job | What it does | Why |
+|:---|:---|:---|
+| **1. Backend Tests** | Installs Python 3.13 + `uv`, runs `pytest` | Catches broken routes, auth bugs, model issues in seconds |
+| **2. Frontend Build** | Installs Node 22, runs `npm run build` | Catches TypeScript errors, missing dependencies, broken bundler config |
+| **3. Compose Integration & E2E** | Builds Docker Compose stack on the runner, runs all integration + Playwright tests | Proves the real container works with real Postgres and real browsers |
+| **4. Deploy to Cloud Run** | Authenticates to GCP, deploys container, verifies live health check | Ships to production only if everything above passed |
 
-### 3. Playwright Dual-Browser End-to-End Test
-Launches two isolated browser contexts simulating an interviewer and a candidate on the canvas:
-```bash
-make e2e
-# Or: cd backend && uv run pytest -v ../e2e/test_two_session_e2e.py
-```
+Jobs 1 and 2 run **in parallel** (fast feedback). Job 3 only runs if both pass. Job 4 only runs if Job 3 passes **and** we're on the `main` branch.
 
 ---
 
-# CI/CD Guide & Architecture Deep-Dive
+# CI/CD Learning Guide
+
+This section is a standalone reference explaining CI/CD concepts in depth.
 
 ## 1. What is CI/CD? The Big Picture
 
@@ -155,26 +238,15 @@ flowchart LR
 
 The pipeline is defined in [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml). It follows modern software engineering best practices: **Fail-Fast Parallel Execution** followed by **Progressive Gating**.
 
-```mermaid
-flowchart TD
-    Push["git push origin main"] --> Job1["Job 1: Backend Unit Tests\n(Python 3.13, uv, pytest)"]
-    Push --> Job2["Job 2: Frontend Build\n(Node 22, npm run build)"]
-    
-    Job1 -->|Success| Job3["Job 3: Compose Integration & E2E Tests\n(Docker Compose: Postgres + App)\n5 Integration Scenarios + Playwright E2E"]
-    Job2 -->|Success| Job3
-    
-    Job3 -->|Success| Job4["Job 4: Deploy to Google Cloud Run\n(europe-west9 + Neon DB)\nAutomated Health Check Verification"]
-```
-
 ### Deep Dive into the 4 Pipeline Jobs:
 
 #### ⚡ Job 1: Backend Tests (Parallel)
-* **Runner:** `ubuntu-latest`.
+* **Runner:** A clean `ubuntu-latest` virtual machine provisioned by GitHub.
 * **What it does:** Sets up Python 3.13, syncs dependencies via `uv`, and executes `pytest` across all 16 backend unit tests.
 * **Why it runs first in parallel:** Unit tests are blazingly fast (taking **~0.7 seconds**). If a backend route or auth logic is broken, the pipeline fails immediately without wasting minutes spinning up Docker containers.
 
 #### ⚡ Job 2: Frontend Tests (Parallel)
-* **Runner:** `ubuntu-latest`.
+* **Runner:** A separate `ubuntu-latest` VM, running at the same time as Job 1.
 * **What it does:** Sets up Node.js 22, installs dependencies, and runs `NITRO_PRESET=node-server npm run build`.
 * **Why it runs first in parallel:** Catches TypeScript errors, missing packages, or broken bundler configurations simultaneously alongside Job 1.
 
@@ -191,11 +263,11 @@ flowchart TD
 #### 🚀 Job 4: Deploy to Google Cloud Run (Continuous Deployment)
 * **Dependency:** `needs: [integration-and-e2e]` and `if: github.ref == 'refs/heads/main'`.
 * **What it does:**
-  1. Authenticates securely to Google Cloud using the `GCP_SA_KEY` GitHub Secret.
-  2. Builds the container image and deploys it to **Google Cloud Run** in `europe-west9`.
-  3. Injects the production database URL from GitHub Secrets (`SDIP_DATABASE_URL` pointing to Neon PostgreSQL).
+  1. Authenticates securely to Google Cloud using the `GCP_SA_KEY` GitHub Secret (a service account key that was created in the GCP Console and stored as an encrypted GitHub repository secret).
+  2. Runs `gcloud run deploy --source .` which builds the container image using Cloud Build and deploys it to **Google Cloud Run** in `europe-west9`.
+  3. Injects the production database URL from GitHub Secrets (`SDIP_DATABASE_URL` pointing to Neon PostgreSQL with SSL).
   4. Configures autoscaling to zero (`--min-instances 0`) and allocates 512Mi memory.
-  5. **Automated Health Check Verification:** Queries `gcloud run services describe` to extract the live service URL, then issues retried HTTP requests to `$SERVICE_URL/api/health` to confirm the deployment is healthy before marking the workflow green.
+  5. **Post-Deployment Health Check:** Fetches the live service URL via `gcloud run services describe`, then issues retried HTTP requests to `$SERVICE_URL/api/health` to confirm the deployment is alive before marking the workflow green.
 
 ---
 
@@ -204,24 +276,16 @@ flowchart TD
 1. **Zero Secret Leaks:**
    * No database passwords, API tokens, or GCP service account keys exist in the repository.
    * All production credentials are injected strictly at runtime via encrypted **GitHub Actions Secrets** (`GCP_SA_KEY`, `SDIP_DATABASE_URL`).
+
 2. **Zero-Cost Serverless Autoscaling:**
    * **Google Cloud Run:** Configured with `--min-instances 0`. When no users are active, instances scale to zero (0 € computing cost). When requests arrive, instances scale up automatically in seconds.
    * **Neon PostgreSQL:** Serverless PostgreSQL that pauses compute automatically after 5 minutes of inactivity, remaining within the free tier.
+
 3. **Zero-Downtime Rolling Deployments:**
    * Google Cloud Run uses revision-based deployments. If a newly deployed revision fails its startup probe or health check, traffic is never switched to it, protecting end users from outages.
+
 4. **Environment Parity:**
-   * Both local development (`docker compose`) and production deployment (`Cloud Run`) use the exact same multi-stage `Dockerfile` and identical PostgreSQL drivers (`psycopg2-binary`).
-
----
-
-## Zero-Cost Cloud Infrastructure
-
-| Component | Provider | Configuration | Cost |
-| :--- | :--- | :--- | :--- |
-| **Compute & Serving** | Google Cloud Run (`europe-west9`) | `--min-instances 0 --max-instances 2 --memory 512Mi` | Free Tier (0 €) |
-| **Relational Database** | Neon.tech Serverless PostgreSQL | PostgreSQL 16 with SSL (`sslmode=require`) & auto-pause | Free Tier (0 €) |
-| **Container Registry** | Google Artifact Registry | Storing application container images | Free Tier |
-| **CI/CD Automation** | GitHub Actions | 2,000 free runner minutes/month | Free Tier (0 €) |
+   * Both local development (`docker compose`) and production deployment (`Cloud Run`) use the exact same multi-stage `Dockerfile` and identical PostgreSQL drivers (`psycopg2-binary`). What you test locally is what runs in the cloud.
 
 ---
 
@@ -230,23 +294,23 @@ flowchart TD
 ```
 .
 ├── .github/workflows/
-│   └── deploy.yml            # 4-stage automated CI/CD pipeline
+│   └── deploy.yml                   # 4-stage CI/CD pipeline
 ├── backend/
 │   ├── src/backend/
-│   │   ├── main.py           # FastAPI entrypoint, routes, and WebSocket hub
-│   │   ├── database.py       # SQLAlchemy engine & session maker (Neon + Local PG)
-│   │   └── models.py         # ORM models (User, Session, BoardState)
-│   ├── tests/                # 16 isolated backend unit tests
-│   └── pyproject.toml        # Python project configuration (uv)
+│   │   ├── main.py                  # FastAPI entrypoint, routes, WebSocket hub
+│   │   ├── database.py              # SQLAlchemy engine (works with SQLite, local PG, and Neon)
+│   │   └── models.py               # ORM models (User, Session, BoardState)
+│   ├── tests/                       # 16 backend unit tests
+│   └── pyproject.toml               # Python project config (uv)
 ├── e2e/
-│   ├── test_compose_integration.py  # 5 multi-container integration tests
+│   ├── test_compose_integration.py  # 5 integration tests against Docker Compose
 │   └── test_two_session_e2e.py      # Playwright dual-browser E2E test
 ├── frontend/
-│   ├── src/                  # SolidJS / React Canvas frontend
-│   └── package.json          # Node 22 build scripts
-├── Dockerfile                # Multi-stage container build (Node 22 + Python 3.13)
-├── docker-compose.yaml       # Multi-container local stack (PostgreSQL + App)
-├── Makefile                  # Developer CLI shortcuts (make test, make e2e)
-├── start.sh                  # Container entrypoint script
-└── README.md                 # Project documentation & CI/CD learning guide
+│   ├── src/                         # React canvas frontend
+│   └── package.json                 # Node 22 build scripts
+├── Dockerfile                       # Multi-stage build (Node 22 → Python 3.13-slim)
+├── docker-compose.yaml              # Local stack: PostgreSQL 16 + App
+├── Makefile                         # Developer shortcuts (make test, make e2e, etc.)
+├── start.sh                         # Container entrypoint (launches frontend SSR + FastAPI)
+└── README.md                        # This file
 ```
