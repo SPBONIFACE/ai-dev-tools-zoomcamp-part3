@@ -31,7 +31,7 @@ jobs:
         run: |
           cd backend
           uv sync
-          uv run pytest -v --ignore=tests/test_compose_integration.py
+          uv run pytest -v
 
   # ==========================================
   # JOB 2: Parallel Frontend Build & Lint Tests
