@@ -1,0 +1,137 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  test-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        run: |
+          if ! command -v uv &>/dev/null; then
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            echo "$HOME/.local/bin" >> $GITHUB_PATH
+            export PATH="$HOME/.local/bin:$PATH"
+          fi
+
+      - name: Install dependencies
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          uv sync --frozen
+
+      - name: Start PostgreSQL container
+        run: |
+          docker rm -f test-postgres 2>/dev/null || true
+          docker run -d --name test-postgres \
+            -e POSTGRES_USER=relay \
+            -e POSTGRES_PASSWORD=relay \
+            -e POSTGRES_DB=relay \
+            -p 5432:5432 \
+            postgres:16-alpine
+          
+          echo "Waiting for PostgreSQL to be ready..."
+          for i in {1..30}; do
+            if docker exec test-postgres pg_isready -U relay -d relay 2>/dev/null; then
+              echo "PostgreSQL is ready!"
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Run starter tests against PostgreSQL
+        env:
+          RELAY_DATABASE_URL: postgresql+psycopg://relay:relay@127.0.0.1:5432/relay
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          uv run pytest test_agent_relay.py -v
+
+      - name: Run integration test against PostgreSQL
+        env:
+          RELAY_DATABASE_URL: postgresql+psycopg://relay:relay@127.0.0.1:5432/relay
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          # Start server in background pointing to PostgreSQL
+          uv run uvicorn main:app --host 127.0.0.1 --port 8000 &
+          SERVER_PID=$!
+          
+          # Wait for server readiness
+          for i in {1..30}; do
+            if curl -s http://127.0.0.1:8000/ready | grep -q '"status":"ready"'; then
+              echo "Server is ready!"
+              break
+            fi
+            sleep 1
+          done
+          
+          # Run integration test
+          BASE_URL=http://127.0.0.1:8000 uv run pytest test_integration.py -v
+          
+          # Stop server
+          kill $SERVER_PID || true
+
+      - name: Stop PostgreSQL test container
+        if: always()
+        run: |
+          docker rm -f test-postgres 2>/dev/null || true
+
+      - name: Build new Docker image with unique tag
+        run: |
+          IMAGE_TAG="agent-relay:v-$(date +%s)"
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+          echo "Building Docker image: $IMAGE_TAG..."
+          docker build -t "$IMAGE_TAG" .
+
+      - name: Install kubectl and kind
+        run: |
+          ARCH=$(uname -m)
+          [ "$ARCH" = "x86_64" ] && K8S_ARCH="amd64" || K8S_ARCH="arm64"
+          
+          if ! command -v kubectl &>/dev/null; then
+            echo "Installing kubectl..."
+            curl -sSLo kubectl "https://dl.k8s.io/release/v1.32.2/bin/linux/${K8S_ARCH}/kubectl"
+            chmod +x kubectl
+            mv kubectl /usr/local/bin/
+          fi
+          
+          if ! command -v kind &>/dev/null; then
+            echo "Installing kind..."
+            curl -sSLo kind "https://kind.sigs.k8s.io/dl/v0.27.0/kind-linux-${K8S_ARCH}"
+            chmod +x kind
+            mv kind /usr/local/bin/
+          fi
+
+      - name: Configure kubeconfig for kind
+        run: |
+          mkdir -p ~/.kube
+          if [ -f "/host-kubeconfig" ]; then
+            cp /host-kubeconfig ~/.kube/config
+          fi
+          CLUSTER_NAME=$(kubectl config view -o jsonpath='{.clusters[0].name}')
+          SERVER_PORT=$(kubectl config view -o jsonpath='{.clusters[0].cluster.server}' | grep -o ':[0-9]*$' | tr -d ':')
+          if [ -n "$SERVER_PORT" ]; then
+            kubectl config set-cluster "$CLUSTER_NAME" --server="https://host.docker.internal:${SERVER_PORT}" --insecure-skip-tls-verify=true
+          fi
+          kubectl cluster-info
+
+      - name: Load image into kind and deploy
+        run: |
+          echo "Loading image $IMAGE_TAG into kind cluster..."
+          kind load docker-image "$IMAGE_TAG" --name kind
+          
+          echo "Updating deployment image to $IMAGE_TAG..."
+          kubectl set image deployment/agent-relay agent-relay="$IMAGE_TAG"
+          
+          echo "Waiting for rollout to finish..."
+          kubectl rollout status deployment/agent-relay --timeout=90s
+          
+          echo "Rollout finished successfully!"
+          kubectl get deployment agent-relay -o wide
